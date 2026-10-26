@@ -2631,9 +2631,48 @@ textarea { resize: vertical; min-height: 80px; }
         <div style="font-size:12px;color:var(--text2);margin-bottom:6px">All your data is saved automatically. Last saved (this browser): <span id="last-saved-time" style="color:var(--success);font-weight:500">—</span></div>
         <div id="data-file-path" style="font-size:11px;color:var(--text3);margin-bottom:10px;font-family:var(--mono);word-break:break-all"></div>
 
+        <!-- Supabase online database -->
+        <div style="margin-bottom:16px;padding:12px 14px;border-radius:12px;border:1px solid var(--border2);background:var(--bg3)">
+          <div style="font-size:13px;font-weight:700;margin-bottom:6px">☁ Supabase Database (Online)</div>
+          <div style="font-size:12px;color:var(--text2);margin-bottom:8px">
+            Project: <span style="font-family:var(--mono);font-size:11px">lbleehxvkbcbcxcayksf.supabase.co</span>
+          </div>
+          <div class="form-group" style="margin-bottom:8px">
+            <label style="font-size:11px">Supabase URL</label>
+            <input id="sb-url" type="text" placeholder="https://xxxx.supabase.co" style="width:100%">
+          </div>
+          <div class="form-group" style="margin-bottom:8px">
+            <label style="font-size:11px">Anon public key (Project Settings → API)</label>
+            <input id="sb-anon-key" type="password" placeholder="eyJhbGciOi..." style="width:100%">
+          </div>
+          <div style="font-size:11px;color:var(--text3);margin-bottom:8px">
+            First time: run the SQL in Supabase → SQL Editor (create table <b>app_data</b>). Then Save key + Test.
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+            <button class="btn primary" type="button" onclick="saveSupabaseSettings()">Save Supabase Key</button>
+            <button class="btn" type="button" onclick="testSupabaseConnection()">Test Supabase</button>
+            <button class="btn" type="button" onclick="manualCloudSave()">Save Data Online Now</button>
+            <button class="btn" type="button" onclick="manualCloudLoad()">Load Data from Online</button>
+          </div>
+          <div id="sb-setup-sql" style="font-size:10px;font-family:var(--mono);color:var(--text3);white-space:pre-wrap;max-height:90px;overflow:auto;border:1px dashed var(--border);padding:8px;border-radius:8px;margin-top:4px">-- Run once in Supabase SQL Editor:
+
+create table if not exists app_data (
+  id int primary key default 1,
+  payload jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now()
+);
+
+alter table app_data enable row level security;
+
+drop policy if exists "anon_all_app_data" on app_data;
+create policy "anon_all_app_data" on app_data
+  for all to anon using (true) with check (true);
+</div>
+        </div>
+
         <!-- InfinityFree MySQL cloud status -->
         <div style="margin-bottom:16px;padding:12px 14px;border-radius:12px;border:1px solid var(--border2);background:var(--bg3)">
-          <div style="font-size:13px;font-weight:700;margin-bottom:6px">☁ MySQL Database (InfinityFree)</div>
+          <div style="font-size:13px;font-weight:700;margin-bottom:6px">☁ MySQL Database (InfinityFree) — optional fallback</div>
           <div style="font-size:12px;color:var(--text2);margin-bottom:8px">
             Status: <span id="cloud-status-badge" style="font-weight:600">—</span>
             <span id="cloud-status-detail" style="color:var(--text3);margin-left:8px"></span>
@@ -4927,7 +4966,7 @@ function showPage(page, el) {
   if(page==='reports') { renderReports(); updateDashboardStats(); }
   if(page==='invoice') renderInvoiceList();
   if(page==='documents') { renderDocumentsLanding(); showDocSection('landing'); }
-  if(page==='settings') { renderSettingsInfo(); renderUsers(); }
+  if(page==='settings') { renderSettingsInfo(); renderUsers(); try { loadSupabaseSettingsForm(); } catch(e) {} }
   updateWorkerSelects();
   saveNavState({ page: page, workerProfileId: null });
 }
@@ -17469,8 +17508,19 @@ let lastMoneyReceiptNo = 0; // auto money receipt sequence
 
 // ── InfinityFree MySQL cloud sync (api.php on same website) ─────────
 const CLOUD_SYNC = true;
-const CLOUD_API_URL = 'api.php';
-const CLOUD_API_KEY = 'ramz_rabc_2026_secret';  // must match API_KEY in api.php
+const CLOUD_API_URL = 'api.php'; // optional fallback
+const CLOUD_API_KEY = 'ramz_rabc_2026_secret';
+const SUPABASE_URL_DEFAULT = 'https://lbleehxvkbcbcxcayksf.supabase.co';
+const SUPABASE_TABLE = 'app_data';
+function getSupabaseUrl() {
+  try { return (localStorage.getItem('ramz_supabase_url') || SUPABASE_URL_DEFAULT).replace(/\/$/, ''); } catch(e) { return SUPABASE_URL_DEFAULT; }
+}
+function getSupabaseKey() {
+  try { return localStorage.getItem('ramz_supabase_anon_key') || ''; } catch(e) { return ''; }
+}
+function isSupabaseConfigured() {
+  return !!(getSupabaseUrl() && getSupabaseKey());
+}
 let _cloudSaveTimer = null;
 let _cloudStatus = 'off'; // off | ok | err | saving
 let _cloudLastMsg = '';
@@ -17515,11 +17565,129 @@ async function cloudFetch(action, body) {
   return data;
 }
 
+
+// ── Supabase online database (primary cloud) ───────────────────────────────
+async function supabaseSave(jsonStr) {
+  const url = getSupabaseUrl();
+  const key = getSupabaseKey();
+  if (!url || !key) throw new Error('Supabase not configured (missing anon key)');
+  let payload;
+  try { payload = typeof jsonStr === 'string' ? JSON.parse(jsonStr) : jsonStr; }
+  catch (e) { throw new Error('Invalid JSON for Supabase save'); }
+  payload.savedAt = payload.savedAt || new Date().toISOString();
+  const body = JSON.stringify({ id: 1, payload: payload, updated_at: new Date().toISOString() });
+  const res = await fetch(url + '/rest/v1/' + SUPABASE_TABLE + '?on_conflict=id', {
+    method: 'POST',
+    headers: {
+      'apikey': key,
+      'Authorization': 'Bearer ' + key,
+      'Content-Type': 'application/json',
+      'Prefer': 'resolution=merge-duplicates,return=minimal'
+    },
+    body: body
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(function(){ return ''; });
+    throw new Error('Supabase save ' + res.status + (t ? (': ' + t.slice(0, 180)) : ''));
+  }
+  return true;
+}
+
+async function supabaseLoad() {
+  const url = getSupabaseUrl();
+  const key = getSupabaseKey();
+  if (!url || !key) return null;
+  const res = await fetch(url + '/rest/v1/' + SUPABASE_TABLE + '?id=eq.1&select=payload,updated_at', {
+    method: 'GET',
+    headers: {
+      'apikey': key,
+      'Authorization': 'Bearer ' + key,
+      'Accept': 'application/json'
+    }
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(function(){ return ''; });
+    throw new Error('Supabase load ' + res.status + (t ? (': ' + t.slice(0, 180)) : ''));
+  }
+  const rows = await res.json();
+  if (!rows || !rows.length) return null;
+  const row = rows[0];
+  if (!row.payload || typeof row.payload !== 'object') return null;
+  return { data: row.payload, updated_at: row.updated_at || row.payload.savedAt || null };
+}
+
+async function supabasePing() {
+  const url = getSupabaseUrl();
+  const key = getSupabaseKey();
+  if (!url || !key) throw new Error('Enter Supabase URL and anon key first');
+  const res = await fetch(url + '/rest/v1/' + SUPABASE_TABLE + '?select=id&limit=1', {
+    method: 'GET',
+    headers: { 'apikey': key, 'Authorization': 'Bearer ' + key }
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(function(){ return ''; });
+    throw new Error('Supabase ' + res.status + (t ? (': ' + t.slice(0, 160)) : ''));
+  }
+  return true;
+}
+
+function loadSupabaseSettingsForm() {
+  try {
+    const u = document.getElementById('sb-url');
+    const k = document.getElementById('sb-anon-key');
+    if (u) u.value = getSupabaseUrl();
+    if (k) k.value = getSupabaseKey();
+  } catch (e) {}
+}
+
+function saveSupabaseSettings() {
+  const u = (document.getElementById('sb-url') && document.getElementById('sb-url').value || '').trim().replace(/\/$/, '');
+  const k = (document.getElementById('sb-anon-key') && document.getElementById('sb-anon-key').value || '').trim();
+  if (!u) { showToast('Supabase URL required'); return; }
+  if (!k) { showToast('Paste the anon public key from Supabase → Settings → API'); return; }
+  try {
+    localStorage.setItem('ramz_supabase_url', u);
+    localStorage.setItem('ramz_supabase_anon_key', k);
+  } catch (e) {
+    showToast('Could not save key in this browser');
+    return;
+  }
+  showToast('Supabase settings saved on this device');
+  setCloudStatus(isSupabaseConfigured() ? 'ok' : 'off', 'Supabase key saved');
+}
+
+async function testSupabaseConnection() {
+  try {
+    const u = (document.getElementById('sb-url') && document.getElementById('sb-url').value || '').trim().replace(/\/$/, '');
+    const k = (document.getElementById('sb-anon-key') && document.getElementById('sb-anon-key').value || '').trim();
+    if (u) localStorage.setItem('ramz_supabase_url', u);
+    if (k) localStorage.setItem('ramz_supabase_anon_key', k);
+    await supabasePing();
+    setCloudStatus('ok', 'Supabase connected');
+    showToast('Supabase connection OK');
+  } catch (e) {
+    setCloudStatus('err', e.message || String(e));
+    showToast('Supabase: ' + (e.message || String(e)));
+  }
+}
+
 async function cloudSaveNow(jsonStr) {
   if (!CLOUD_SYNC) return false;
   setCloudStatus('saving');
   try {
-    // 1) Normal JSON POST
+    // 0) Supabase primary
+    if (isSupabaseConfigured()) {
+      try {
+        await supabaseSave(jsonStr);
+        setCloudStatus('ok', 'Supabase saved ' + new Date().toLocaleTimeString());
+        try { localStorage.setItem('ramz_cloud_last_ok', new Date().toISOString()); } catch(e) {}
+        return true;
+      } catch (eSupa) {
+        console.warn('Supabase save failed, trying api.php:', eSupa.message || eSupa);
+        setCloudStatus('err', 'Supabase: ' + (eSupa.message || String(eSupa)));
+      }
+    }
+    // 1) InfinityFree api.php fallback
     try {
       const res = await cloudFetch('save', jsonStr);
       const r = res.results || {};
@@ -17571,6 +17739,18 @@ function scheduleCloudSave(jsonStr) {
 
 async function cloudLoadData() {
   if (!CLOUD_SYNC) return null;
+  if (isSupabaseConfigured()) {
+    try {
+      const packed = await supabaseLoad();
+      if (packed && packed.data) {
+        setCloudStatus('ok', 'Loaded from Supabase');
+        return packed;
+      }
+    } catch (e) {
+      console.warn('Supabase load failed:', e.message || e);
+      setCloudStatus('err', 'Supabase: ' + (e.message || String(e)));
+    }
+  }
   try {
     const res = await cloudFetch('load');
     if (res && res.data && typeof res.data === 'object') {
